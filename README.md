@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # dso-structured-data-permutation
 Randomly permutes the order of columns or rows within structured data formats (CSV, TSV) to break correlations and relationships between data points. Offers options to exclude key columns from permutation. - Focused on Tools for sanitizing and obfuscating sensitive data within text files and structured data formats
 
