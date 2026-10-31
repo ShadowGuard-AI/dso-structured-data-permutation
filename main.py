@@ -1,6 +1,7 @@
 import argparse
 import csv
 import logging
+import os
 import random
 import sys
 from chardet.universaldetector import UniversalDetector
@@ -72,129 +73,120 @@ def validate_input(args):
     return True
 
 
+def _resolve_exclude_indices(header, exclude_columns):
+    indices = set()
+    if exclude_columns:
+        for col in exclude_columns:
+            try:
+                index = int(col)
+                if 0 <= index < len(header):
+                    indices.add(index)
+                else:
+                    logging.warning(f"Invalid column index in exclude_columns: {col}.  Skipping.")
+            except ValueError:
+                if col in header:
+                    indices.add(header.index(col))
+                else:
+                    logging.warning(f"Column name not found in header: {col}. Skipping.")
+    return indices
+
+
+def _read_all(input_file, delimiter, quotechar, encoding):
+    if encoding is None:
+        encoding = 'utf-8'
+    with open(input_file, 'r', encoding=encoding, newline='') as infile:
+        reader = csv.reader(infile, delimiter=delimiter, quotechar=quotechar)
+        rows = list(reader)
+    if not rows:
+        raise ValueError("Input file is empty; nothing to permute.")
+    header = rows[0]
+    data_rows = rows[1:]
+    if not data_rows:
+        raise ValueError("Input file has a header only; nothing to permute.")
+    for i, row in enumerate(data_rows):
+        if len(row) != len(header):
+            raise ValueError(f"Row {i + 2} has {len(row)} field(s), expected {len(header)}.")
+    return header, data_rows
+
+
+def _write_all(output_file, header, rows, delimiter, quotechar, encoding):
+    if encoding is None:
+        encoding = 'utf-8'
+    with open(output_file, 'w', newline='', encoding=encoding) as outfile:
+        writer = csv.writer(outfile, delimiter=delimiter, quotechar=quotechar)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
 def permute_columns(input_file, output_file, delimiter=',', quotechar='"', exclude_columns=None, encoding=None):
     """
-    Permutes the order of columns in a CSV/TSV file.
-
-    Args:
-        input_file (str): Path to the input file.
-        output_file (str): Path to the output file.
-        delimiter (str): Delimiter used in the file (default: ,).
-        quotechar (str): Quote character used in the file (default: ").
-        exclude_columns (list): List of column names/indices to exclude from permutation (default: None).
-        encoding (str): Encoding of the file (default: None).
+    Permutes the order of columns. The same column order is applied to the
+    header and to every row, so a column and its values move as a unit.
+    Excluded columns stay at their original indices. Errors propagate.
     """
-    try:
-        with open(input_file, 'r', encoding=encoding) as infile, open(output_file, 'w', newline='', encoding=encoding) as outfile:
-            reader = csv.reader(infile, delimiter=delimiter, quotechar=quotechar)
-            writer = csv.writer(outfile, delimiter=delimiter, quotechar=quotechar)
-
-            header = next(reader)
-            num_columns = len(header)
-
-            if exclude_columns:
-                # Convert exclude_columns to a set for faster lookup
-                exclude_indices = set()
-                for col in exclude_columns:
-                    try:
-                        # Attempt to convert to integer (index)
-                        index = int(col)
-                        if 0 <= index < num_columns:
-                            exclude_indices.add(index)
-                        else:
-                            logging.warning(f"Invalid column index in exclude_columns: {col}.  Skipping.")
-
-                    except ValueError:
-                        # Handle as column name
-                        try:
-                            index = header.index(col)  # Safer lookup with header index
-                            exclude_indices.add(index)
-                        except ValueError:
-                            logging.warning(f"Column name not found in header: {col}. Skipping.")
-                            continue
-
-
-                # Create a list of columns to permute, excluding the specified ones
-                permute_indices = [i for i in range(num_columns) if i not in exclude_indices]
-
-                # Create a new header, putting excluded columns in their original positions and permuting the rest
-                permuted_header = [None] * num_columns
-                permuted_columns = [header[i] for i in permute_indices]
-                random.shuffle(permuted_columns)
-
-                permute_index = 0
-                for i in range(num_columns):
-                    if i in exclude_indices:
-                        permuted_header[i] = header[i]
-                    else:
-                        permuted_header[i] = permuted_columns[permute_index]
-                        permute_index += 1
-
-
-            else:
-                 # Simple permutation when no columns are excluded
-                permute_indices = list(range(num_columns))
-                random.shuffle(permute_indices)
-                permuted_header = [header[i] for i in permute_indices]
-
-            writer.writerow(permuted_header)
-
-
-            for row in reader:
-                if len(row) != num_columns:
-                    logging.warning(f"Skipping row with incorrect number of columns: {len(row)} != {num_columns}")
-                    continue
-
-                permuted_row = [None] * num_columns
-                if exclude_columns: # More complex approach necessary if columns are to be skipped
-                     row_values = [row[i] for i in permute_indices]
-                     permuted_row_values = []
-
-                     permute_index = 0
-
-                     for i in range(num_columns):
-
-                        if i in exclude_indices:
-                            permuted_row[i] = row[i] # Add back the skipped columns
-                        else:
-                            permuted_row[i] = row_values[permute_index]
-                            permute_index +=1
-
-                else:
-                     permuted_row = [row[i] for i in permute_indices]
-
-
-                writer.writerow(permuted_row)
-
-
-        logging.info(f"Columns permuted successfully from {input_file} to {output_file}")
-
-    except Exception as e:
-        logging.error(f"Error permuting columns: {e}")
-
+    if os.path.realpath(input_file) == os.path.realpath(output_file):
+        raise ValueError("Output file resolves to the input file; refusing to overwrite it.")
+    header, data_rows = _read_all(input_file, delimiter, quotechar, encoding)
+    num_columns = len(header)
+    exclude_indices = _resolve_exclude_indices(header, exclude_columns)
+    permute_indices = [i for i in range(num_columns) if i not in exclude_indices]
+    if len(permute_indices) < 2:
+        raise ValueError("Fewer than two columns are available to permute; nothing would change.")
+    shuffled = list(permute_indices)
+    for _attempt in range(100):
+        random.shuffle(shuffled)
+        if shuffled != permute_indices:
+            break
+    if shuffled == permute_indices:
+        shuffled = shuffled[1:] + shuffled[:1]
+    new_order = []
+    it = iter(shuffled)
+    for i in range(num_columns):
+        if i in exclude_indices:
+            new_order.append(i)
+        else:
+            new_order.append(next(it))
+    permuted_header = [header[i] for i in new_order]
+    permuted_rows = [[row[i] for i in new_order] for row in data_rows]
+    _write_all(output_file, permuted_header, permuted_rows, delimiter, quotechar, encoding)
+    logging.info(f"Columns permuted successfully from {input_file} to {output_file}")
+    return True
 
 
 def permute_rows(input_file, output_file, delimiter=',', quotechar='"', exclude_columns=None, encoding=None):
     """
-    Permutes the order of rows in a CSV/TSV file.
+    Permutes the order of rows. When columns are excluded, those columns keep
+    their original row order while the remaining columns are permuted as a
+    block. Errors propagate.
     """
-    try:
-        with open(input_file, 'r', encoding=encoding) as infile, open(output_file, 'w', newline='', encoding=encoding) as outfile:
-            reader = csv.reader(infile, delimiter=delimiter, quotechar=quotechar)
-            writer = csv.writer(outfile, delimiter=delimiter, quotechar=quotechar)
-
-            header = next(reader)
-            writer.writerow(header)
-
-            rows = list(reader)
-            random.shuffle(rows)
-
-            writer.writerows(rows)
-
-        logging.info(f"Rows permuted successfully from {input_file} to {output_file}")
-
-    except Exception as e:
-        logging.error(f"Error permuting rows: {e}")
+    if os.path.realpath(input_file) == os.path.realpath(output_file):
+        raise ValueError("Output file resolves to the input file; refusing to overwrite it.")
+    header, data_rows = _read_all(input_file, delimiter, quotechar, encoding)
+    if len(data_rows) < 2:
+        raise ValueError("Fewer than two data rows; nothing would change.")
+    exclude_indices = _resolve_exclude_indices(header, exclude_columns)
+    shuffled_rows = [list(r) for r in data_rows]
+    for _attempt in range(100):
+        random.shuffle(shuffled_rows)
+        if shuffled_rows != data_rows:
+            break
+    if shuffled_rows == data_rows:
+        shuffled_rows = shuffled_rows[1:] + shuffled_rows[:1]
+    if exclude_indices:
+        out_rows = []
+        for i, original in enumerate(data_rows):
+            row = []
+            for c in range(len(header)):
+                if c in exclude_indices:
+                    row.append(original[c])
+                else:
+                    row.append(shuffled_rows[i][c])
+            out_rows.append(row)
+    else:
+        out_rows = shuffled_rows
+    _write_all(output_file, header, out_rows, delimiter, quotechar, encoding)
+    logging.info(f"Rows permuted successfully from {input_file} to {output_file}")
+    return True
 
 
 def main():
@@ -219,10 +211,18 @@ def main():
     exclude_columns = [col.strip() for col in args.exclude_columns.split(',') if col.strip()] if args.exclude_columns else None
 
 
-    if args.permute_rows:
-        permute_rows(args.input_file, args.output_file, args.delimiter, args.quotechar, exclude_columns, args.encoding)
-    else:
-        permute_columns(args.input_file, args.output_file, args.delimiter, args.quotechar, exclude_columns, args.encoding)
+    if os.path.realpath(args.input_file) == os.path.realpath(args.output_file):
+        logging.error("Output file resolves to the input file; refusing to overwrite it.")
+        sys.exit(1)
+
+    try:
+        if args.permute_rows:
+            permute_rows(args.input_file, args.output_file, args.delimiter, args.quotechar, exclude_columns, args.encoding)
+        else:
+            permute_columns(args.input_file, args.output_file, args.delimiter, args.quotechar, exclude_columns, args.encoding)
+    except Exception as e:
+        logging.error(f"Permutation failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
