@@ -36,6 +36,9 @@ def detect_encoding(file_path):
     Returns:
         str: The detected encoding, or None if detection fails.
     """
+    # I feed the detector line by line and stop as soon as it decides. Reading
+    # the whole file first would give the same answer for most inputs, and
+    # this way a large file costs one pass over its opening lines.
     detector = UniversalDetector()
     try:
         with open(file_path, 'rb') as f:
@@ -78,6 +81,9 @@ def _resolve_exclude_indices(header, exclude_columns):
     if exclude_columns:
         for col in exclude_columns:
             try:
+                # A token that parses as an integer is always treated as an index, never
+                # as a name. A column literally named 0 cannot be excluded by name, and
+                # with duplicate header names, index() below finds only the first one.
                 index = int(col)
                 if 0 <= index < len(header):
                     indices.add(index)
@@ -104,6 +110,10 @@ def _read_all(input_file, delimiter, quotechar, encoding):
     if not data_rows:
         raise ValueError("Input file has a header only; nothing to permute.")
     for i, row in enumerate(data_rows):
+        # Ragged rows are refused outright. Permuting a row with the wrong number
+        # of fields would shift values into the wrong columns, which is exactly
+        # the kind of silent corruption this check exists to prevent. The row
+        # number in the message counts the header as row 1.
         if len(row) != len(header):
             raise ValueError(f"Row {i + 2} has {len(row)} field(s), expected {len(header)}.")
     return header, data_rows
@@ -133,12 +143,20 @@ def permute_columns(input_file, output_file, delimiter=',', quotechar='"', exclu
     if len(permute_indices) < 2:
         raise ValueError("Fewer than two columns are available to permute; nothing would change.")
     shuffled = list(permute_indices)
+    # I retry the shuffle rather than accept an identity result. A permutation
+    # that changes nothing would still write a file and log success, so after
+    # 100 identical draws the rotate below forces at least a positional
+    # change. It cannot help when every row is identical; then the output
+    # equals the input no matter what, and nothing here can detect that.
     for _attempt in range(100):
         random.shuffle(shuffled)
         if shuffled != permute_indices:
             break
     if shuffled == permute_indices:
         shuffled = shuffled[1:] + shuffled[:1]
+    # Excluded columns stay pinned at their original index. The shuffled list
+    # fills only the remaining slots, in order, so a column and its values
+    # always move together as one unit.
     new_order = []
     it = iter(shuffled)
     for i in range(num_columns):
@@ -172,6 +190,10 @@ def permute_rows(input_file, output_file, delimiter=',', quotechar='"', exclude_
             break
     if shuffled_rows == data_rows:
         shuffled_rows = shuffled_rows[1:] + shuffled_rows[:1]
+    # With exclusions, the excluded columns keep their original row order
+    # while the rest of each row comes from the shuffled copy. That breaks
+    # the link between an excluded identifier column and the values it used
+    # to sit beside, which is the point of permuting for release.
     if exclude_indices:
         out_rows = []
         for i, original in enumerate(data_rows):
@@ -205,6 +227,8 @@ def main():
             args.encoding = 'utf-8'
 
 
+    # validate_input only proves the file opens. Shape problems, ragged rows,
+    # and too little data are caught later in _read_all, inside the try.
     if not validate_input(args):
         sys.exit(1)
 
